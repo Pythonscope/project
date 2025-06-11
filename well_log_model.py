@@ -1,4 +1,5 @@
 import pandas as pd, numpy as np
+import matplotlib.pyplot as plt 
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
 from sklearn.impute import KNNImputer
@@ -95,6 +96,43 @@ class WellLogInterpreter:
         self.metrics = {'Lithology Accuracy (CV)': cv_acc}
 
     # ------------------------------------------------------------------  recommend
+    def make_plot(self):
+    """
+    Build a professional 5-track well-log plot:
+    GR, log-scaled RT, NPHI, RHOB and a colour-filled lithology column.
+    Returns a Matplotlib Figure.
+    """
+    if self.data is None:
+        raise ValueError("No data loaded")
+
+    depth = self.data['DEPTH']
+    fig, axes = plt.subplots(1, 5, figsize=(14, 8), sharey=True)
+
+    # 1 – Gamma Ray
+    axes[0].plot(self.data['GR'], depth, 'g-', lw=.8)
+    axes[0].set_xlim(0, 200); axes[0].set_xlabel('GR (API)'); axes[0].set_title('GR')
+    # 2 – Resistivity (log)
+    axes[1].semilogx(self.data['RT'], depth, 'r-', lw=.8)
+    axes[1].set_xlim(0.2, 2000); axes[1].set_xlabel('RT (Ω·m)'); axes[1].set_title('Resistivity')
+    # 3 – Neutron Porosity
+    axes[2].plot(self.data['NPHI'], depth, 'b-', lw=.8)
+    axes[2].set_xlim(0, 0.5); axes[2].set_xlabel('NPHI'); axes[2].set_title('Neutron Φ')
+    # 4 – Bulk Density
+    axes[3].plot(self.data['RHOB'], depth, 'k-', lw=.8)
+    axes[3].set_xlim(1.95, 2.95); axes[3].set_xlabel('RHOB (g/cc)'); axes[3].set_title('Density')
+    # 5 – Lithology column
+    lith_colours = {'Sandstone':'gold', 'Limestone':'skyblue', 'Shale':'brown'}
+    for i in range(len(depth)-1):
+        lith = self.data.get('LITHOLOGY', pd.Series(['Unknown']*len(depth))).iloc[i]
+        axes[4].fill_betweenx([depth.iloc[i], depth.iloc[i+1]], 0, 1,
+                              color=lith_colours.get(lith, 'grey'), alpha=.7)
+    axes[4].set_xlim(0,1); axes[4].set_xticks([]); axes[4].set_title('Lithology')
+
+    # Shared settings
+    for ax in axes:
+        ax.invert_yaxis(); ax.grid(True, alpha=.3); ax.set_ylabel('Depth (ft)')
+    fig.tight_layout()
+    return fig
     def generate_recommendations(self):
         Xs = self.scaler.transform(self.data[self.feature_columns + self.extra_features])
 
@@ -120,3 +158,4 @@ class WellLogInterpreter:
         msg += f"Frac candidates    : {frac.sum():3d}  @ {rng(frac)}\n"
         msg += f"Sandstone sections : {sand.sum():3d}  @ {rng(sand)}\n"
         return msg
+        
