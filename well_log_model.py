@@ -1,172 +1,220 @@
-import pandas as pd, numpy as np
-import matplotlib.pyplot as plt
+# ================================================================
+# well_log_model.py  ─  PRO edition
+# ================================================================
+import time, warnings, numpy as np, pandas as pd, matplotlib.pyplot as plt
+from sklearn.impute            import KNNImputer
+from sklearn.preprocessing     import StandardScaler, LabelEncoder
+from sklearn.ensemble          import RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble          import GradientBoostingRegressor
+from sklearn.model_selection   import GridSearchCV, train_test_split
+from sklearn.metrics           import accuracy_score, r2_score
 
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+try:                        # optional – only used if installed
+    from imblearn.over_sampling import SMOTE
+    HAS_SMOTE = True
+except ImportError:
+    HAS_SMOTE = False
+    warnings.warn("imblearn not installed – SMOTE disabled")
 
-# ────────────────────────────────────────────────────────────────
-class WellLogInterpreter:
+# ----------------------------------------------------------------
+class ProWellLogInterpreter:
+    """Professional-grade, resource-aware well-log AI interpreter"""
+    # ───────────────────────────────────────────────────────────
     def __init__(self):
-        self.data               = None
-        self.feature_columns    = ['GR', 'RT', 'NPHI', 'RHOB', 'PEF']
-        self.lithology_model    = None
-        self.porosity_model     = None
-        self.permeability_model = None
-        self.saturation_model   = None
-        self.scaler             = None
-        self.encoder            = LabelEncoder()
-        self.metrics            = {}
+        self.data    : pd.DataFrame | None = None
+        self.features: list[str] = ['GR', 'RT', 'NPHI', 'RHOB', 'PEF']
+        self.models  = {}
+        self.scaler  = StandardScaler()
+        self.encoder = LabelEncoder()
+        self.metrics = {}
 
-    # ────────────────────────────────────────────────────────────
-    # 1. LOAD  + PRE-PROCESS
-    def preprocess_data(self, path_or_buffer):
-        self.data = pd.read_csv(path_or_buffer)
+    # ───────────────────────────────────────────────────────────
+    # 1. DATA INGEST / PRE-PROCESS
+    def preprocess_data(self, csv: str | bytes | bytearray):
+        """Load CSV, clean, impute, engineer features; return dataframe."""
+        t0 = time.time()
+        df = pd.read_csv(csv)
 
-        missing = [c for c in self.feature_columns if c not in self.data.columns]
+        # basic sanity
+        missing = [c for c in self.features if c not in df.columns]
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # mean imputation (fast)
-        imputer = SimpleImputer(strategy='mean')
-        self.data[self.feature_columns] = imputer.fit_transform(
-            self.data[self.feature_columns])
+        # clip obvious outliers to 1st-99th percentiles
+        for col in self.features:
+            lo, hi = np.percentile(df[col].dropna(), [1, 99])
+            df[col] = df[col].clip(lo, hi)
 
-        # simple engineered features
-        self.data['RT_GR_Ratio']         = self.data['RT'] / (self.data['GR'] + 1e-3)
-        self.data['NPHI_RHOB_Crossplot'] = self.data['NPHI'] * self.data['RHOB']
-        return self.data
+        # KNN impute (handles non-linear gaps better than mean/median)
+        df[self.features] = KNNImputer(n_neighbors=5).fit_transform(df[self.features])
 
-    # ────────────────────────────────────────────────────────────
-    # 2. SYNTHETIC TARGETS
-    def generate_targets(self):
+        # ── feature engineering ──
+        df['RT_GR_Ratio']          = df['RT']   / (df['GR']   + 1e-3)
+        df['NPHI_RHOB_Crossplot']  = df['NPHI'] * df['RHOB']
+        df['GR_log']               = np.log1p(df['GR'])
+        df['RT_log']               = np.log1p(df['RT'])
+        df['Deep_Resistivity']     = np.log1p(df['RT'] * df['PEF'])  # toy example
+
+        self.extra = ['RT_GR_Ratio','NPHI_RHOB_Crossplot','GR_log','RT_log',
+                      'Deep_Resistivity']
+        self.all_feat = self.features + self.extra
+        self.data = df
+
+        print(f"PREPROCESS: {len(df)} rows, {len(self.all_feat)} features "
+              f"({time.time()-t0:.2f}s)")
+        return df
+
+    # ───────────────────────────────────────────────────────────
+    # 2. SYNTHETIC TARGET GENERATION (for demo environments)
+    def generate_targets(self, seed: int = 42):
+        """Create demo lithology & petrophysical targets."""
         if self.data is None:
-            raise ValueError("No data loaded – upload first")
+            raise RuntimeError("Call preprocess_data() first")
 
+        np.random.seed(seed)
         n = len(self.data)
-        np.random.seed(42)
-        self.data['LITHOLOGY']       = np.random.choice(['Sandstone',
-                                                         'Limestone',
-                                                         'Shale'], n)
-        self.data['POROSITY']        = np.clip(
-            0.25 - 0.001*self.data['GR'] + np.random.normal(0, 0.02, n), 0, 0.35)
-        self.data['PERMEABILITY']    = np.clip(
-            100*np.exp(-self.data['RT']/50)+np.random.normal(0, 5, n), 0, 1000)
-        self.data['WATER_SATURATION'] = np.clip(
-            1 - self.data['POROSITY'] + np.random.normal(0, 0.05, n), 0, 1)
 
-    # ────────────────────────────────────────────────────────────
-    # 3. LIGHT-WEIGHT TRAINING
+        # lithology rule-based mock-up
+        def lithologic(row):
+            if row.GR > 75 and row.RT < 10:                     return 'Shale'
+            if row.GR < 30 and row.RT > 100 and row.NPHI < .15: return 'Sandstone'
+            if row.GR < 50 and row.RT > 20:                     return 'Sandstone'
+            if row.RHOB > 2.7 and row.PEF > 4:                  return 'Limestone'
+            return 'Shale'
+
+        self.data['LITHOLOGY'] = self.data.apply(lithologic, axis=1)
+
+        # reservoir properties
+        phi  = 0.40 - (self.data.RHOB - 1.5) * 0.18 + np.random.normal(0, .02, n)
+        k    = np.exp( 8*phi - 2) * (1 / (self.data.RT+1)) * np.random.lognormal(0,.4,n)
+        sw   = 0.25 + 0.55/(1+np.exp((self.data.RT-60)/18)) + np.random.normal(0,.04,n)
+
+        self.data['POROSITY']        = np.clip(phi , .05, .35)
+        self.data['PERMEABILITY']    = np.clip(k   , .1 , 1500)
+        self.data['WATER_SATURATION']= np.clip(sw  , .15, 1.0)
+
+    # ───────────────────────────────────────────────────────────
+    # 3. TRAIN
     def train_models(self):
         if self.data is None:
-            raise ValueError("No data loaded")
+            raise RuntimeError("Data not loaded")
 
-        targets = ['LITHOLOGY', 'POROSITY', 'PERMEABILITY', 'WATER_SATURATION']
-        if any(t not in self.data.columns for t in targets):
-            raise ValueError("Target columns missing – run generate_targets()")
-
-        X   = self.data[self.feature_columns].copy()
-        y_L = self.encoder.fit_transform(self.data['LITHOLOGY'])
-        y_P = self.data['POROSITY'].values
-        y_K = self.data['PERMEABILITY'].values
-        y_S = self.data['WATER_SATURATION'].values
-
-        # scale once
-        self.scaler = StandardScaler()
+        X = self.data[self.all_feat].values
         Xs = self.scaler.fit_transform(X)
 
-        rf_cls = RandomForestClassifier(n_estimators=20, max_depth=4,
-                                        random_state=42, n_jobs=1)
-        rf_reg = dict(n_estimators=20, max_depth=4, random_state=42, n_jobs=1)
+        # --- lithology classifier ------------------------------------------------
+        y_cls = self.encoder.fit_transform(self.data['LITHOLOGY'])
+        X_train, X_val, y_train, y_val = train_test_split(
+            Xs, y_cls, stratify=y_cls, test_size=0.2, random_state=42)
 
-        self.lithology_model    = rf_cls.fit(Xs, y_L)
-        self.porosity_model     = RandomForestRegressor(**rf_reg).fit(Xs, y_P)
-        self.permeability_model = RandomForestRegressor(**rf_reg).fit(Xs, y_K)
-        self.saturation_model   = RandomForestRegressor(**rf_reg).fit(Xs, y_S)
+        # optional SMOTE to balance classes
+        if HAS_SMOTE:
+            try:
+                X_train, y_train = SMOTE(random_state=42).fit_resample(X_train, y_train)
+            except Exception as e:
+                warnings.warn(f"SMOTE skipped: {e}")
 
-        self.metrics = {"Samples": len(self.data),
-                        "Model":   "Ultra-light RandomForest"}
+        grid = GridSearchCV(
+            RandomForestClassifier(),
+            param_grid={'n_estimators':[100,200],
+                        'max_depth'   :[6,10]},
+            cv=3, n_jobs=-1, scoring='accuracy')
+        grid.fit(X_train, y_train)
+        clf = grid.best_estimator_
+        acc = accuracy_score(y_val, clf.predict(X_val))
 
-    # ────────────────────────────────────────────────────────────
-    # 4. PROFESSIONAL PLOT  (title removed)
+        # --- regression models ---------------------------------------------------
+        def reg(model, y):      # helper to fit & score
+            r = model.fit(X_train, y_train_reg := y[train_idx])
+            r2 = r2_score(y_val_reg := y[val_idx], r.predict(X_val))
+            return r, r2
+
+        # index masks for fast scoring
+        train_idx, val_idx = X_train[:,0].shape[0], X_val[:,0].shape[0]
+        full_idx = np.arange(len(self.data))
+        train_idx = np.isin(full_idx, train_idx)
+        val_idx   = ~train_idx
+
+        y_phi  = self.data['POROSITY'        ].values
+        y_perm = self.data['PERMEABILITY'    ].values
+        y_sw   = self.data['WATER_SATURATION'].values
+
+        rf_reg = dict(n_estimators=200, max_depth=8, random_state=42, n_jobs=-1)
+        phi_model , r2_phi  = reg(RandomForestRegressor(**rf_reg), y_phi )
+        perm_model, r2_perm = reg(GradientBoostingRegressor(random_state=42), y_perm)
+        sw_model  , r2_sw   = reg(RandomForestRegressor(**rf_reg), y_sw  )
+
+        # store
+        self.models  = dict(lithology=clf, porosity=phi_model,
+                            permeability=perm_model, saturation=sw_model)
+        self.metrics = dict(lithology_acc=f"{acc:.3f}",
+                            r2_phi=f"{r2_phi:.3f}",
+                            r2_perm=f"{r2_perm:.3f}",
+                            r2_sw=f"{r2_sw:.3f}")
+        print("TRAINING summary:", self.metrics)
+
+    # ───────────────────────────────────────────────────────────
+    # 4. PLOT  (headline removed)
     def make_plot(self):
         if self.data is None or 'DEPTH' not in self.data.columns:
-            raise ValueError("DEPTH column missing")
+            raise RuntimeError("DEPTH column missing")
 
         depth = self.data['DEPTH']
-        fig, ax = plt.subplots(1, 5, figsize=(14, 8), sharey=True)
+        fig, ax = plt.subplots(1, 5, figsize=(15,8), sharey=True)
 
-        # track-1 GR
-        ax[0].plot(self.data['GR'], depth, 'g-')
-        ax[0].set_xlim(0, 200); ax[0].set_xlabel('GR (API)')
-        ax[0].set_title('GR'); ax[0].grid(alpha=.3)
+        ax[0].plot(self.data.GR , depth, 'g-'); ax[0].set_xlim(0,200); ax[0].set_title('GR')
+        ax[1].semilogx(self.data.RT, depth,'r-'); ax[1].set_xlim(.2,2000); ax[1].set_title('RT')
+        ax[2].plot(self.data.NPHI, depth,'b-'); ax[2].set_xlim(0,.5); ax[2].set_title('NPHI')
+        ax[3].plot(self.data.RHOB, depth,'k-'); ax[3].set_xlim(1.95,2.95); ax[3].set_title('RHOB')
 
-        # track-2 RT
-        ax[1].semilogx(self.data['RT'], depth, 'r-')
-        ax[1].set_xlim(0.2, 2000); ax[1].set_xlabel('RT (Ω·m)')
-        ax[1].set_title('RT'); ax[1].grid(alpha=.3)
-
-        # track-3 NPHI
-        ax[2].plot(self.data['NPHI'], depth, 'b-')
-        ax[2].set_xlim(0, 0.5); ax[2].set_xlabel('NPHI')
-        ax[2].set_title('NPHI'); ax[2].grid(alpha=.3)
-
-        # track-4 RHOB
-        ax[3].plot(self.data['RHOB'], depth, 'k-')
-        ax[3].set_xlim(1.95, 2.95); ax[3].set_xlabel('RHOB (g/cc)')
-        ax[3].set_title('RHOB'); ax[3].grid(alpha=.3)
-
-        # track-5 Lithology
         colors = {'Sandstone':'#FFD700','Limestone':'#87CEEB','Shale':'#A0522D'}
         for i in range(len(depth)-1):
-            lith = self.data['LITHOLOGY'].iat[i]
-            ax[4].fill_betweenx(depth.iloc[i:i+2], 0, 1,
-                                color=colors.get(lith,'grey'), alpha=.8)
-        ax[4].set_xlim(0,1); ax[4].set_xticks([]); ax[4].set_title('Lithology')
-
-        # legend
+            col = colors.get(self.data.LITHOLOGY.iloc[i],'grey')
+            ax[4].fill_betweenx(depth.iloc[i:i+2],0,1,color=col,alpha=.8)
+        ax[4].set_title('Lithology'); ax[4].set_xticks([]); ax[4].set_xlim(0,1)
         from matplotlib.patches import Patch
-        patches=[Patch(fc=c, label=l) for l,c in colors.items()]
-        ax[4].legend(handles=patches, loc='center left', bbox_to_anchor=(1.04,0.5))
-
-        # formatting
-        for a in ax:
-            a.invert_yaxis(); a.set_ylabel('Depth (ft)')
+        ax[4].legend([Patch(fc=c) for c in colors.values()],
+                     colors.keys(), loc='center left', bbox_to_anchor=(1,0.5))
+        for a in ax: a.invert_yaxis(); a.grid(alpha=.3); a.set_ylabel('Depth (ft)')
         plt.tight_layout()
         return fig
 
-    # ────────────────────────────────────────────────────────────
-    # 5. NUMBERED RECOMMENDATION REPORT  (returned as txt)
+    # ───────────────────────────────────────────────────────────
+    # 5. TEXT REPORT  (numbered)
     def generate_recommendations(self):
-        if self.scaler is None:
-            raise RuntimeError("Run train_models() first")
+        if not self.models:
+            raise RuntimeError("Train models first")
 
-        Xs = self.scaler.transform(self.data[self.feature_columns])
-        lith = self.encoder.inverse_transform(
-            self.lithology_model.predict(Xs))
-        phi  = self.porosity_model.predict(Xs)
-        perm = self.permeability_model.predict(Xs)
-        sw   = self.saturation_model.predict(Xs)
+        Xs = self.scaler.transform(self.data[self.all_feat])
+        lith = self.encoder.inverse_transform(self.models['lithology'].predict(Xs))
+        phi  = self.models['porosity'].predict(Xs)
+        perm = self.models['permeability'].predict(Xs)
+        sw   = self.models['saturation'].predict(Xs)
 
-        df = pd.DataFrame({'DEPTH':self.data['DEPTH'],
-                           'LITH':lith,'PHI':phi,'PERM':perm,'SW':sw})
-        pay = (df.PHI>0.12)&(df.PERM>10)&(df.SW<0.65)
+        df = pd.DataFrame(dict(DEPTH=self.data.DEPTH, LITH=lith,
+                               PHI=phi, PERM=perm, SW=sw))
+        pay = (df.PHI>.15)&(df.PERM>50)&(df.SW<.6)
 
-        # ---------- plain-text report ----------
-        txt  =  "════════════════════════ RESERVOIR ANALYSIS ════════════════════════\n"
+        txt  = "════════════════════════ RESERVOIR ANALYSIS ════════════════════════\n"
         txt += f"1. Interval analysed : {df.DEPTH.min():.0f}-{df.DEPTH.max():.0f} ft\n"
-        txt += f"2. Net-to-gross ratio: {pay.mean():.1%}\n"
-        txt += f"3. Avg. Porosity     : {phi.mean():.1%}\n"
-        txt += f"4. Avg. Permeability : {perm.mean():.1f} mD\n"
-        txt += f"5. Avg. Water Sat.   : {sw.mean():.1%}\n"
-        txt += "\nRECOMMENDATIONS\n---------------\n"
+        txt += f"2. Main lithology    : {df.LITH.mode()[0]}\n"
+        txt += f"3. Net pay           : {pay.sum()} ft ({pay.mean():.1%})\n"
+        txt += f"4. Avg Porosity      : {phi.mean():.1%}\n"
+        txt += f"5. Avg Perm          : {perm.mean():.1f} mD\n"
+        txt += f"6. Avg Water Sat     : {sw.mean():.1%}\n\n"
+
+        txt += "RECOMMENDATIONS\n---------------\n"
         if pay.sum()>20:
-            txt += "1. Good pay detected – perforate main sand units.\n"
+            txt += "1. Excellent reservoir quality – pursue primary completion.\n"
         elif pay.sum()>10:
-            txt += "1. Moderate pay – consider selective completion.\n"
+            txt += "1. Moderate pay – selective perforation recommended.\n"
         else:
-            txt += "1. Marginal pay – further analysis advised.\n"
-        txt += "2. Acquire pressure data to confirm drive mechanism.\n"
-        txt += "3. Run production test before final completion design.\n"
+            txt += "1. Marginal pay – consider advanced stimulation or sidetrack.\n"
+        txt += "2. Perform pressure/buildup test to confirm drive mechanism.\n"
+        txt += "3. Run cased-hole saturation monitoring logs during production.\n"
         txt += "═════════════════════════════════════════════════════════════════════"
         return txt
+# ----------------------------------------------------------------
+# factory for fast import
+def get_interpreter():
+    return ProWellLogInterpreter()
