@@ -161,7 +161,7 @@ class WellLogInterpreter:
         self.metrics = {'Lithology Accuracy (CV)': float(cv_acc)}
 
     def make_plot(self):
-        """Create professional 5-track well log plot."""
+        """Create professional 5-track well log plot with lithology legend."""
         if self.data is None:
             raise ValueError("No data loaded")
 
@@ -169,63 +169,100 @@ class WellLogInterpreter:
             raise ValueError("DEPTH column missing from data")
 
         depth = self.data['DEPTH']
-        fig, axes = plt.subplots(1, 5, figsize=(14, 8), sharey=True)
+        fig, axes = plt.subplots(1, 5, figsize=(16, 10), sharey=True)
 
         # Track 1: Gamma Ray
         axes[0].plot(self.data['GR'], depth, 'g-', linewidth=0.8)
         axes[0].set_xlim(0, 200)
         axes[0].set_xlabel('GR (API)')
         axes[0].set_title('Gamma Ray')
+        axes[0].grid(True, alpha=0.3)
 
         # Track 2: Resistivity (log scale)
         axes[1].semilogx(self.data['RT'], depth, 'r-', linewidth=0.8)
         axes[1].set_xlim(0.2, 2000)
         axes[1].set_xlabel('RT (Ω·m)')
         axes[1].set_title('Resistivity')
+        axes[1].grid(True, alpha=0.3)
 
         # Track 3: Neutron Porosity
         axes[2].plot(self.data['NPHI'], depth, 'b-', linewidth=0.8)
         axes[2].set_xlim(0, 0.5)
         axes[2].set_xlabel('NPHI')
         axes[2].set_title('Neutron Porosity')
+        axes[2].grid(True, alpha=0.3)
 
         # Track 4: Bulk Density
         axes[3].plot(self.data['RHOB'], depth, 'k-', linewidth=0.8)
         axes[3].set_xlim(1.95, 2.95)
         axes[3].set_xlabel('RHOB (g/cc)')
         axes[3].set_title('Bulk Density')
+        axes[3].grid(True, alpha=0.3)
 
-        # Track 5: Lithology
+        # Track 5: Lithology with Enhanced Legend
         lith_colors = {
-            'Sandstone': 'gold',
-            'Limestone': 'skyblue', 
-            'Shale': 'brown'
+            'Sandstone': '#FFD700',    # Gold/Yellow
+            'Limestone': '#87CEEB',    # Sky Blue
+            'Shale': '#8B4513'         # Brown
         }
         
         if 'LITHOLOGY' in self.data.columns:
+            # Fill lithology intervals
             for i in range(len(depth) - 1):
                 lith = self.data['LITHOLOGY'].iloc[i]
                 color = lith_colors.get(lith, 'grey')
                 axes[4].fill_betweenx(
                     [depth.iloc[i], depth.iloc[i+1]], 0, 1,
-                    color=color, alpha=0.7
+                    color=color, alpha=0.8, edgecolor='black', linewidth=0.1
                 )
+            
+            # Create legend
+            legend_elements = []
+            unique_liths = self.data['LITHOLOGY'].unique()
+            for lith in unique_liths:
+                if lith in lith_colors:
+                    legend_elements.append(
+                        plt.Rectangle((0, 0), 1, 1, 
+                                    facecolor=lith_colors[lith], 
+                                    alpha=0.8, 
+                                    edgecolor='black',
+                                    label=lith)
+                    )
+            
+            # Add legend outside the plot area
+            axes[4].legend(handles=legend_elements, 
+                          loc='center left', 
+                          bbox_to_anchor=(1.05, 0.5),
+                          fontsize=10,
+                          title='Lithology')
         
         axes[4].set_xlim(0, 1)
         axes[4].set_xticks([])
         axes[4].set_title('Lithology')
+        axes[4].grid(True, alpha=0.3)
 
-        # Apply common formatting
-        for ax in axes:
+        # Apply common formatting to all tracks
+        for i, ax in enumerate(axes):
             ax.invert_yaxis()
-            ax.grid(True, alpha=0.3)
-            ax.set_ylabel('Depth (ft)')
+            ax.set_ylabel('Depth (ft)' if i == 0 else '')
+            
+            # Add depth tick marks on the right side for better readability
+            if i == len(axes) - 1:
+                ax.yaxis.tick_right()
+                ax.yaxis.set_label_position('right')
+                ax.set_ylabel('Depth (ft)')
 
-        fig.tight_layout()
+        # Add overall title
+        fig.suptitle('AI Well Log Interpretation - Professional Analysis', fontsize=14, fontweight='bold')
+        
+        # Adjust layout to accommodate legend
+        plt.tight_layout()
+        plt.subplots_adjust(right=0.82)
+        
         return fig
 
     def generate_recommendations(self):
-        """Generate comprehensive reservoir recommendations based on trained models."""
+        """Generate comprehensive reservoir recommendations with proper formatting."""
         if self.scaler is None:
             raise RuntimeError("Models not trained - run 'Train Models' first")
 
@@ -252,20 +289,15 @@ class WellLogInterpreter:
         # Calculate hydrocarbon saturation
         results['SH'] = 1 - results['SW']
 
-        # Define comprehensive quality zones based on industry standards
+        # Define comprehensive quality zones
         pay_zone = (results['PHI'] > 0.12) & (results['PERM'] > 10) & (results['SW'] < 0.65) & (results['LITH'] == 'Sandstone')
         excellent_pay = (results['PHI'] > 0.20) & (results['PERM'] > 100) & (results['SW'] < 0.50)
         good_pay = (results['PHI'] > 0.15) & (results['PERM'] > 50) & (results['SW'] < 0.60)
-        
         tight_gas_candidate = (results['PHI'] > 0.08) & (results['PERM'] < 10) & (results['SW'] < 0.70) & (results['LITH'] == 'Sandstone')
         water_zone = results['SW'] > 0.80
         transition_zone = results['SW'].between(0.65, 0.80)
-        
         shale_zone = results['LITH'] == 'Shale'
         clean_sand = (results['LITH'] == 'Sandstone') & (results['GR'] < 60)
-        carbonate_zone = results['LITH'] == 'Limestone'
-        
-        # Fracturing candidates based on brittleness and thickness
         frac_candidates = (results['PERM'].between(1, 50)) & (results['PHI'] > 0.08) & (results['LITH'] == 'Sandstone')
 
         # Helper functions
@@ -285,51 +317,74 @@ class WellLogInterpreter:
                 return results[mask][prop].mean()
             return 0
 
-        # Build comprehensive recommendation report
+        # Build comprehensive recommendation report with proper line formatting
         msg = "═══════════════════════════════════════════════════════════════\n"
         msg += "                    AI-POWERED RESERVOIR ANALYSIS               \n"
-        msg += "═══════════════════════════════════════════════════════════════\n\n"
+        msg += "═══════════════════════════════════════════════════════════════\n"
+        msg += "\n"
 
         # EXECUTIVE SUMMARY
         msg += "🎯 EXECUTIVE SUMMARY\n"
         msg += "─" * 50 + "\n"
         msg += f"• Total analyzed interval: {results['DEPTH'].min():.0f} - {results['DEPTH'].max():.0f} ft ({len(results)} ft)\n"
         msg += f"• Primary lithology: {results['LITH'].mode()[0]} ({results['LITH'].value_counts().iloc[0]} ft)\n"
-        msg += f"• Overall reservoir quality: {'Excellent' if excellent_pay.sum() > len(results)*0.3 else 'Good' if good_pay.sum() > len(results)*0.2 else 'Fair' if pay_zone.sum() > len(results)*0.1 else 'Poor'}\n"
-        msg += f"• Net-to-gross ratio: {pay_zone.sum()/len(results):.1%}\n\n"
+        overall_quality = 'Excellent' if excellent_pay.sum() > len(results)*0.3 else 'Good' if good_pay.sum() > len(results)*0.2 else 'Fair' if pay_zone.sum() > len(results)*0.1 else 'Poor'
+        msg += f"• Overall reservoir quality: {overall_quality}\n"
+        msg += f"• Net-to-gross ratio: {pay_zone.sum()/len(results):.1%}\n"
+        msg += "\n"
 
         # PETROPHYSICAL PROPERTIES
         msg += "📊 AVERAGE PETROPHYSICAL PROPERTIES\n"
         msg += "─" * 50 + "\n"
-        msg += f"• Porosity (PHIE):        {por_pred.mean():.1%} (Range: {por_pred.min():.1%} - {por_pred.max():.1%})\n"
-        msg += f"• Permeability (k):       {perm_pred.mean():.1f} mD (Range: {perm_pred.min():.1f} - {perm_pred.max():.1f} mD)\n"
-        msg += f"• Water Saturation (Sw):  {sw_pred.mean():.1%} (Range: {sw_pred.min():.1%} - {sw_pred.max():.1%})\n"
-        msg += f"• Hydrocarbon Sat. (Sh):  {(1-sw_pred).mean():.1%} (Range: {(1-sw_pred).min():.1%} - {(1-sw_pred).max():.1%})\n\n"
+        msg += f"• Porosity (PHIE):        {por_pred.mean():.1%}\n"
+        msg += f"  └─ Range: {por_pred.min():.1%} - {por_pred.max():.1%}\n"
+        msg += f"• Permeability (k):       {perm_pred.mean():.1f} mD\n"
+        msg += f"  └─ Range: {perm_pred.min():.1f} - {perm_pred.max():.1f} mD\n"
+        msg += f"• Water Saturation (Sw):  {sw_pred.mean():.1%}\n"
+        msg += f"  └─ Range: {sw_pred.min():.1%} - {sw_pred.max():.1%}\n"
+        msg += f"• Hydrocarbon Sat. (Sh):  {(1-sw_pred).mean():.1%}\n"
+        msg += f"  └─ Range: {(1-sw_pred).min():.1%} - {(1-sw_pred).max():.1%}\n"
+        msg += "\n"
 
         # RESERVOIR ZONATION
         msg += "🗂️  RESERVOIR ZONATION & QUALITY ASSESSMENT\n"
         msg += "─" * 50 + "\n"
-        msg += f"• Excellent Pay Zones:    {zone_thickness(excellent_pay)} @ {depth_range(excellent_pay)}\n"
+        msg += f"• Excellent Pay Zones:    {zone_thickness(excellent_pay)}\n"
+        msg += f"  └─ Depth: {depth_range(excellent_pay)}\n"
         if excellent_pay.any():
-            msg += f"  └─ Avg. Porosity: {avg_properties(excellent_pay, 'PHI'):.1%}, Perm: {avg_properties(excellent_pay, 'PERM'):.0f} mD, Sw: {avg_properties(excellent_pay, 'SW'):.1%}\n"
+            msg += f"  └─ Avg. Porosity: {avg_properties(excellent_pay, 'PHI'):.1%}\n"
+            msg += f"  └─ Avg. Perm: {avg_properties(excellent_pay, 'PERM'):.0f} mD\n"
+            msg += f"  └─ Avg. Sw: {avg_properties(excellent_pay, 'SW'):.1%}\n"
+        msg += "\n"
         
-        msg += f"• Good Pay Zones:         {zone_thickness(good_pay)} @ {depth_range(good_pay)}\n"
+        msg += f"• Good Pay Zones:         {zone_thickness(good_pay)}\n"
+        msg += f"  └─ Depth: {depth_range(good_pay)}\n"
         if good_pay.any():
-            msg += f"  └─ Avg. Porosity: {avg_properties(good_pay, 'PHI'):.1%}, Perm: {avg_properties(good_pay, 'PERM'):.0f} mD, Sw: {avg_properties(good_pay, 'SW'):.1%}\n"
+            msg += f"  └─ Avg. Porosity: {avg_properties(good_pay, 'PHI'):.1%}\n"
+            msg += f"  └─ Avg. Perm: {avg_properties(good_pay, 'PERM'):.0f} mD\n"
+            msg += f"  └─ Avg. Sw: {avg_properties(good_pay, 'SW'):.1%}\n"
+        msg += "\n"
         
-        msg += f"• Marginal Pay Zones:     {zone_thickness(pay_zone & ~good_pay)} @ {depth_range(pay_zone & ~good_pay)}\n"
-        msg += f"• Tight Gas Candidates:   {zone_thickness(tight_gas_candidate)} @ {depth_range(tight_gas_candidate)}\n"
-        msg += f"• Transition Zones:       {zone_thickness(transition_zone)} @ {depth_range(transition_zone)}\n"
-        msg += f"• Water Zones:            {zone_thickness(water_zone)} @ {depth_range(water_zone)}\n\n"
+        msg += f"• Marginal Pay Zones:     {zone_thickness(pay_zone & ~good_pay)}\n"
+        msg += f"  └─ Depth: {depth_range(pay_zone & ~good_pay)}\n"
+        msg += f"• Tight Gas Candidates:   {zone_thickness(tight_gas_candidate)}\n"
+        msg += f"  └─ Depth: {depth_range(tight_gas_candidate)}\n"
+        msg += f"• Transition Zones:       {zone_thickness(transition_zone)}\n"
+        msg += f"  └─ Depth: {depth_range(transition_zone)}\n"
+        msg += f"• Water Zones:            {zone_thickness(water_zone)}\n"
+        msg += f"  └─ Depth: {depth_range(water_zone)}\n"
+        msg += "\n"
 
         # LITHOLOGICAL ANALYSIS
         msg += "🪨 LITHOLOGICAL DISTRIBUTION\n"
         msg += "─" * 50 + "\n"
         for lith, count in results['LITH'].value_counts().items():
             percentage = count / len(results) * 100
-            msg += f"• {lith:12s}: {count:3d} ft ({percentage:4.1f}%) @ {depth_range(results['LITH'] == lith)}\n"
-        
-        msg += f"• Clean Sandstone:        {zone_thickness(clean_sand)} @ {depth_range(clean_sand)}\n\n"
+            msg += f"• {lith:12s}: {count:3d} ft ({percentage:4.1f}%)\n"
+            msg += f"  └─ Depth: {depth_range(results['LITH'] == lith)}\n"
+        msg += f"• Clean Sandstone:        {zone_thickness(clean_sand)}\n"
+        msg += f"  └─ Depth: {depth_range(clean_sand)}\n"
+        msg += "\n"
 
         # COMPLETION RECOMMENDATIONS
         msg += "🔧 COMPLETION & DEVELOPMENT RECOMMENDATIONS\n"
@@ -339,35 +394,25 @@ class WellLogInterpreter:
             msg += f"✅ PRIMARY TARGETS ({excellent_pay.sum()} ft):\n"
             msg += f"   • Conventional completion recommended\n"
             msg += f"   • High production potential zones\n"
-            msg += f"   • Consider for primary perforation intervals\n\n"
+            msg += f"   • Consider for primary perforation intervals\n"
+            msg += f"   • Depth: {depth_range(excellent_pay)}\n"
+            msg += "\n"
         
         if frac_candidates.sum() > 5:
             msg += f"⚡ FRACTURING CANDIDATES ({frac_candidates.sum()} ft):\n"
             msg += f"   • Hydraulic fracturing recommended\n"
             msg += f"   • Multi-stage completion design\n"
-            msg += f"   • Depth intervals: {depth_range(frac_candidates)}\n\n"
+            msg += f"   • Enhanced recovery potential\n"
+            msg += f"   • Depth: {depth_range(frac_candidates)}\n"
+            msg += "\n"
         
         if tight_gas_candidate.sum() > 5:
             msg += f"🎯 TIGHT GAS POTENTIAL ({tight_gas_candidate.sum()} ft):\n"
             msg += f"   • Unconventional development approach\n"
             msg += f"   • Enhanced recovery techniques required\n"
-            msg += f"   • Consider horizontal drilling + multi-frac\n\n"
-
-        # DRILLING & LOGGING RECOMMENDATIONS  
-        msg += "🚧 DRILLING & LOGGING RECOMMENDATIONS\n"
-        msg += "─" * 50 + "\n"
-        
-        if water_zone.sum() > len(results) * 0.3:
-            msg += f"⚠️  HIGH WATER RISK: Monitor water production closely\n"
-        
-        if shale_zone.sum() > len(results) * 0.4:
-            msg += f"⚠️  SHALE DOMINANT: Consider shale gas potential\n"
-        
-        if results['PHI'].std() > 0.05:
-            msg += f"📈 HIGH HETEROGENEITY: Detailed reservoir modeling recommended\n"
-        
-        msg += f"🔍 ADDITIONAL LOGGING: Consider advanced logs for detailed characterization\n"
-        msg += f"🎯 CASING PROGRAM: Set casing above {results[water_zone]['DEPTH'].min():.0f} ft if possible\n\n"
+            msg += f"   • Consider horizontal drilling + multi-frac\n"
+            msg += f"   • Depth: {depth_range(tight_gas_candidate)}\n"
+            msg += "\n"
 
         # PRODUCTION FORECAST
         msg += "📈 PRODUCTION INSIGHTS\n"
@@ -376,4 +421,55 @@ class WellLogInterpreter:
         if total_pay > 20:
             msg += f"🟢 PRODUCTION OUTLOOK: Favorable ({total_pay} ft net pay)\n"
             msg += f"   • Expected production: Good to excellent\n"
-            msg += f"   • Primary drive mechanism: {'Solution gas' if sw_pred.mean() < 0.6 else 'Water drive
+            drive_mech = 'Solution gas' if sw_pred.mean() < 0.6 else 'Water drive'
+            msg += f"   • Primary drive mechanism: {drive_mech}\n"
+        elif total_pay > 10:
+            msg += f"🟡 PRODUCTION OUTLOOK: Moderate ({total_pay} ft net pay)\n"
+            msg += f"   • Expected production: Fair to good\n"
+            msg += f"   • Enhanced recovery may be required\n"
+        else:
+            msg += f"🔴 PRODUCTION OUTLOOK: Challenging ({total_pay} ft net pay)\n"
+            msg += f"   • Expected production: Limited\n"
+            msg += f"   • Consider alternative completion strategies\n"
+        msg += "\n"
+
+        msg += f"📊 KEY RESERVOIR METRICS:\n"
+        msg += f"   • Net Pay Ratio: {total_pay/len(results):.1%}\n"
+        estimated_pressure = 1000 + results['DEPTH'].mean() * 0.43
+        msg += f"   • Est. Reservoir Pressure: {estimated_pressure:.0f} psi\n"
+        completion_stages = max(1, frac_candidates.sum()//10)
+        msg += f"   • Recommended Completion Stages: {completion_stages}\n"
+        msg += "\n"
+
+        # DRILLING RECOMMENDATIONS
+        msg += "🚧 DRILLING & LOGGING RECOMMENDATIONS\n"
+        msg += "─" * 50 + "\n"
+        
+        if water_zone.sum() > len(results) * 0.3:
+            msg += f"⚠️  HIGH WATER RISK:\n"
+            msg += f"   • Monitor water production closely\n"
+            msg += f"   • Consider water shut-off techniques\n"
+        
+        if shale_zone.sum() > len(results) * 0.4:
+            msg += f"⚠️  SHALE DOMINANT SEQUENCE:\n"
+            msg += f"   • Consider shale gas potential\n"
+            msg += f"   • Evaluate horizontal drilling options\n"
+        
+        if results['PHI'].std() > 0.05:
+            msg += f"📈 HIGH RESERVOIR HETEROGENEITY:\n"
+            msg += f"   • Detailed reservoir modeling recommended\n"
+            msg += f"   • Consider additional log acquisition\n"
+        
+        msg += f"🔍 ADDITIONAL RECOMMENDATIONS:\n"
+        msg += f"   • Advanced logging for detailed characterization\n"
+        if water_zone.any():
+            msg += f"   • Set casing above {results[water_zone]['DEPTH'].min():.0f} ft if possible\n"
+        msg += f"   • Consider pressure testing in pay zones\n"
+        msg += f"   • Implement real-time drilling optimization\n"
+        msg += "\n"
+
+        msg += "═══════════════════════════════════════════════════════════════\n"
+        msg += "                         END OF ANALYSIS                        \n"
+        msg += "═══════════════════════════════════════════════════════════════"
+
+        return msg
