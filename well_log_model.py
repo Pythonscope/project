@@ -49,7 +49,6 @@ class WellLogInterpreter:
         self.data['RT_GR_Ratio'] = self.data['RT'] / (self.data['GR'] + 1e-3)
         self.data['NPHI_RHOB_Crossplot'] = self.data['NPHI'] * self.data['RHOB']
         
-        print(f"Data preprocessed: {len(self.data)} rows, {len(self.data.columns)} columns")
         return self.data
 
     def generate_targets(self):
@@ -61,48 +60,21 @@ class WellLogInterpreter:
         if n == 0:
             raise ValueError("Data is empty")
         
-        print(f"Generating targets for {n} samples...")
-        
-        # Generate synthetic targets with more realistic correlations
+        # Generate synthetic targets
         np.random.seed(42)  # For reproducible results
-        
-        # Generate LITHOLOGY based on log characteristics
-        lithology = []
-        for _, row in self.data.iterrows():
-            if row['GR'] > 75 and row['RT'] < 10:
-                lithology.append('Shale')
-            elif row['GR'] < 30 and row['RT'] > 100 and row['NPHI'] < 0.15:
-                lithology.append('Sandstone')
-            elif row['GR'] < 50 and row['RT'] > 20:
-                lithology.append('Sandstone')
-            elif row['RHOB'] > 2.7 and row['PEF'] > 4:
-                lithology.append('Limestone')
-            else:
-                lithology.append('Shale')
-        
-        self.data['LITHOLOGY'] = lithology
-        
-        # Generate POROSITY with realistic correlations
-        porosity = 0.4 - (self.data['RHOB'] - 1.5) * 0.15 + np.random.normal(0, 0.02, n)
-        self.data['POROSITY'] = np.clip(porosity, 0.05, 0.35)
-        
-        # Generate PERMEABILITY with exponential-porosity relationship
-        base_perm = np.exp(8 * self.data['POROSITY'] - 2) * (1 / (self.data['RT'] + 1))
-        noise = np.random.lognormal(0, 0.5, n)
-        permeability = base_perm * noise
-        self.data['PERMEABILITY'] = np.clip(permeability, 0.1, 1000)
-        
-        # Generate WATER_SATURATION
-        water_sat = 0.3 + 0.5 / (1 + np.exp((self.data['RT'] - 50) / 20)) + np.random.normal(0, 0.05, n)
-        self.data['WATER_SATURATION'] = np.clip(water_sat, 0.2, 1.0)
-        
-        print(f"Targets generated successfully!")
-        return True
+        self.data['LITHOLOGY'] = np.random.choice(['Sandstone', 'Limestone', 'Shale'], n)
+        self.data['POROSITY'] = np.clip(
+            0.25 - 0.001 * self.data['GR'] + np.random.normal(0, 0.02, n), 0, 0.35)
+        self.data['PERMEABILITY'] = np.clip(
+            100 * np.exp(-self.data['RT'] / 50) + np.random.normal(0, 5, n), 0, 1000)
+        self.data['WATER_SATURATION'] = np.clip(
+            1 - self.data['POROSITY'] + np.random.normal(0, 0.05, n), 0, 1)
 
     def train_models(self):
-        """Train all ML models with robust error handling."""
-        print("Starting model training...")
-        
+        """Train all ML models with proper error handling."""
+        if not HAS_SMOTE:
+            raise ImportError('pip install imbalanced-learn')
+
         # Validate data exists
         if self.data is None:
             raise ValueError("No data loaded - run upload first")
@@ -117,17 +89,13 @@ class WellLogInterpreter:
         if len(self.data) == 0:
             raise ValueError("Data is empty")
 
-        print(f"Training with {len(self.data)} samples...")
-
         # Prepare features and targets
         all_features = self.feature_columns + self.extra_features
         X = self.data[all_features].copy()
         
-        # Handle NaN values properly - don't throw error, fix them
+        # Check for NaN values
         if X.isnull().any().any():
-            print("Handling NaN values in features...")
-            imputer = KNNImputer(n_neighbors=min(3, len(X)//2))
-            X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns, index=X.index)
+            raise ValueError("Features contain NaN values after preprocessing")
         
         # Encode lithology
         y_lith = self.encoder.fit_transform(self.data['LITHOLOGY'])
@@ -139,89 +107,58 @@ class WellLogInterpreter:
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X)
 
-        # Apply SMOTE for class balancing with proper error handling
-        X_bal, y_bal = X_scaled, y_lith  # Default fallback
-        
-        if HAS_SMOTE and len(self.data) > 10:
-            try:
-                # Adjust k_neighbors based on sample size
-                k_neighbors = min(5, len(np.unique(y_lith)) - 1, len(self.data) // 2)
-                if k_neighbors > 0:
-                    smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
-                    X_bal, y_bal = smote.fit_resample(X_scaled, y_lith)
-                    print(f"Applied SMOTE: {len(X_scaled)} -> {len(X_bal)} samples")
-                else:
-                    print("Skipped SMOTE: insufficient samples")
-            except Exception as e:
-                print(f"SMOTE failed, using original data: {str(e)}")
-                X_bal, y_bal = X_scaled, y_lith
+        # Apply SMOTE for class balancing
+        try:
+            X_bal, y_bal = SMOTE(random_state=42).fit_resample(X_scaled, y_lith)
+        except Exception as e:
+            raise ValueError(f"SMOTE resampling failed: {str(e)}")
 
-        # Train lithology classifier with simplified approach
-        print("Training lithology model...")
-        
-        # Use simpler models for reliability
-        if HAS_XGB and len(X_bal) > 50:
-            self.lithology_model = XGBClassifier(
+        # Train lithology classifier
+        if HAS_XGB:
+            base_clf = XGBClassifier(
                 objective='multi:softprob',
                 use_label_encoder=False,
                 eval_metric='mlogloss',
-                random_state=42,
-                n_estimators=50,  # Reduced for speed
-                max_depth=3,
-                learning_rate=0.1
+                random_state=42
             )
+            param_grid = {
+                'n_estimators': [100, 200],
+                'max_depth': [3, 5],
+                'learning_rate': [0.03, 0.1]
+            }
         else:
-            self.lithology_model = RandomForestClassifier(
-                random_state=42,
-                n_estimators=50,  # Reduced for speed
-                max_depth=5
-            )
+            base_clf = RandomForestClassifier(random_state=42)
+            param_grid = {
+                'n_estimators': [100, 200],
+                'max_depth': [5, 10]
+            }
 
-        # Skip grid search for speed and reliability
-        self.lithology_model.fit(X_bal, y_bal)
+        # Grid search for best parameters
+        grid_search = GridSearchCV(
+            base_clf, param_grid, cv=3, scoring='accuracy', n_jobs=-1
+        )
+        self.lithology_model = grid_search.fit(X_bal, y_bal).best_estimator_
 
-        # Calculate cross-validation accuracy with proper handling
-        try:
-            cv_folds = min(3, len(X_bal) // 5, 3)  # Ensure enough samples per fold
-            if cv_folds >= 2:
-                cv_scores = cross_val_score(
-                    self.lithology_model, X_bal, y_bal, cv=cv_folds, scoring='accuracy'
-                )
-                cv_acc = cv_scores.mean()
-            else:
-                cv_acc = 0.85  # Placeholder for very small datasets
-        except Exception as e:
-            print(f"CV failed: {e}")
-            cv_acc = 0.85
+        # Calculate cross-validation accuracy
+        cv_scores = cross_val_score(
+            self.lithology_model, X_bal, y_bal, cv=5, scoring='accuracy'
+        )
+        cv_acc = cv_scores.mean()
 
-        # Train regression models with simpler parameters
-        print("Training regression models...")
-        
-        reg_params = {'n_estimators': 50, 'random_state': 42, 'max_depth': 5}
-        
-        if HAS_XGB and len(self.data) > 50:
+        # Train regression models
+        reg_params = {'n_estimators': 200, 'random_state': 42}
+        if HAS_XGB:
+            reg_params = {'n_estimators': 200, 'learning_rate': 0.03, 'random_state': 42}
             RegClass = XGBRegressor
-            reg_params = {'n_estimators': 50, 'learning_rate': 0.1, 'random_state': 42, 'max_depth': 3}
         else:
             RegClass = RandomForestRegressor
 
-        try:
-            self.porosity_model = RegClass(**reg_params).fit(X_scaled, y_por)
-            self.permeability_model = RegClass(**reg_params).fit(X_scaled, y_perm)
-            self.saturation_model = RegClass(**reg_params).fit(X_scaled, y_sw)
-        except Exception as e:
-            raise ValueError(f"Regression model training failed: {str(e)}")
+        self.porosity_model = RegClass(**reg_params).fit(X_scaled, y_por)
+        self.permeability_model = RegClass(**reg_params).fit(X_scaled, y_perm)
+        self.saturation_model = RegClass(**reg_params).fit(X_scaled, y_sw)
 
         # Store metrics
-        self.metrics = {
-            'Lithology Accuracy (CV)': float(cv_acc),
-            'Samples Used': len(self.data),
-            'Features Used': len(all_features),
-            'Model Type': 'XGBoost' if HAS_XGB else 'RandomForest'
-        }
-        
-        print(f"Training completed! CV Accuracy: {cv_acc:.3f}")
-        return self.metrics
+        self.metrics = {'Lithology Accuracy (CV)': float(cv_acc)}
 
     def make_plot(self):
         """Create professional 5-track well log plot."""
@@ -288,7 +225,7 @@ class WellLogInterpreter:
         return fig
 
     def generate_recommendations(self):
-        """Generate reservoir recommendations based on trained models."""
+        """Generate comprehensive reservoir recommendations based on trained models."""
         if self.scaler is None:
             raise RuntimeError("Models not trained - run 'Train Models' first")
 
@@ -307,31 +244,136 @@ class WellLogInterpreter:
             'LITH': lith_pred,
             'PHI': por_pred,
             'PERM': perm_pred,
-            'SW': sw_pred
+            'SW': sw_pred,
+            'GR': self.data['GR'],
+            'RT': self.data['RT']
         })
 
-        # Define quality zones
-        pay_zone = (results['PHI'] > 0.20) & (results['PERM'] > 100) & (results['SW'] < 0.6)
-        water_zone = results['SW'] > 0.70
-        frac_zone = results['PERM'].between(50, 100)
-        sand_zone = results['LITH'] == 'Sandstone'
+        # Calculate hydrocarbon saturation
+        results['SH'] = 1 - results['SW']
 
-        # Helper function for depth ranges
+        # Define comprehensive quality zones based on industry standards
+        pay_zone = (results['PHI'] > 0.12) & (results['PERM'] > 10) & (results['SW'] < 0.65) & (results['LITH'] == 'Sandstone')
+        excellent_pay = (results['PHI'] > 0.20) & (results['PERM'] > 100) & (results['SW'] < 0.50)
+        good_pay = (results['PHI'] > 0.15) & (results['PERM'] > 50) & (results['SW'] < 0.60)
+        
+        tight_gas_candidate = (results['PHI'] > 0.08) & (results['PERM'] < 10) & (results['SW'] < 0.70) & (results['LITH'] == 'Sandstone')
+        water_zone = results['SW'] > 0.80
+        transition_zone = results['SW'].between(0.65, 0.80)
+        
+        shale_zone = results['LITH'] == 'Shale'
+        clean_sand = (results['LITH'] == 'Sandstone') & (results['GR'] < 60)
+        carbonate_zone = results['LITH'] == 'Limestone'
+        
+        # Fracturing candidates based on brittleness and thickness
+        frac_candidates = (results['PERM'].between(1, 50)) & (results['PHI'] > 0.08) & (results['LITH'] == 'Sandstone')
+
+        # Helper functions
         def depth_range(mask):
             if mask.any():
-                return f"{results[mask]['DEPTH'].min():.1f}-{results[mask]['DEPTH'].max():.1f} ft"
-            return "-"
+                depths = results[mask]['DEPTH']
+                return f"{depths.min():.0f}-{depths.max():.0f} ft"
+            return "None identified"
 
-        # Build recommendation message
-        msg = "=== AI-Powered Recommendations ===\n"
-        msg += f"Average Properties:\n"
-        msg += f"  Porosity: {por_pred.mean():.2%}\n"
-        msg += f"  Permeability: {perm_pred.mean():.1f} mD\n"
-        msg += f"  Water Saturation: {sw_pred.mean():.2%}\n\n"
-        msg += "Zone Analysis:\n"
-        msg += f"  High-quality pay zones: {pay_zone.sum():4d} intervals @ {depth_range(pay_zone)}\n"
-        msg += f"  High water risk zones:  {water_zone.sum():4d} intervals @ {depth_range(water_zone)}\n"
-        msg += f"  Frac candidate zones:   {frac_zone.sum():4d} intervals @ {depth_range(frac_zone)}\n"
-        msg += f"  Sandstone zones:        {sand_zone.sum():4d} intervals @ {depth_range(sand_zone)}\n"
+        def zone_thickness(mask):
+            if mask.any():
+                return f"{mask.sum()} ft"
+            return "0 ft"
 
-        return msg
+        def avg_properties(mask, prop):
+            if mask.any():
+                return results[mask][prop].mean()
+            return 0
+
+        # Build comprehensive recommendation report
+        msg = "═══════════════════════════════════════════════════════════════\n"
+        msg += "                    AI-POWERED RESERVOIR ANALYSIS               \n"
+        msg += "═══════════════════════════════════════════════════════════════\n\n"
+
+        # EXECUTIVE SUMMARY
+        msg += "🎯 EXECUTIVE SUMMARY\n"
+        msg += "─" * 50 + "\n"
+        msg += f"• Total analyzed interval: {results['DEPTH'].min():.0f} - {results['DEPTH'].max():.0f} ft ({len(results)} ft)\n"
+        msg += f"• Primary lithology: {results['LITH'].mode()[0]} ({results['LITH'].value_counts().iloc[0]} ft)\n"
+        msg += f"• Overall reservoir quality: {'Excellent' if excellent_pay.sum() > len(results)*0.3 else 'Good' if good_pay.sum() > len(results)*0.2 else 'Fair' if pay_zone.sum() > len(results)*0.1 else 'Poor'}\n"
+        msg += f"• Net-to-gross ratio: {pay_zone.sum()/len(results):.1%}\n\n"
+
+        # PETROPHYSICAL PROPERTIES
+        msg += "📊 AVERAGE PETROPHYSICAL PROPERTIES\n"
+        msg += "─" * 50 + "\n"
+        msg += f"• Porosity (PHIE):        {por_pred.mean():.1%} (Range: {por_pred.min():.1%} - {por_pred.max():.1%})\n"
+        msg += f"• Permeability (k):       {perm_pred.mean():.1f} mD (Range: {perm_pred.min():.1f} - {perm_pred.max():.1f} mD)\n"
+        msg += f"• Water Saturation (Sw):  {sw_pred.mean():.1%} (Range: {sw_pred.min():.1%} - {sw_pred.max():.1%})\n"
+        msg += f"• Hydrocarbon Sat. (Sh):  {(1-sw_pred).mean():.1%} (Range: {(1-sw_pred).min():.1%} - {(1-sw_pred).max():.1%})\n\n"
+
+        # RESERVOIR ZONATION
+        msg += "🗂️  RESERVOIR ZONATION & QUALITY ASSESSMENT\n"
+        msg += "─" * 50 + "\n"
+        msg += f"• Excellent Pay Zones:    {zone_thickness(excellent_pay)} @ {depth_range(excellent_pay)}\n"
+        if excellent_pay.any():
+            msg += f"  └─ Avg. Porosity: {avg_properties(excellent_pay, 'PHI'):.1%}, Perm: {avg_properties(excellent_pay, 'PERM'):.0f} mD, Sw: {avg_properties(excellent_pay, 'SW'):.1%}\n"
+        
+        msg += f"• Good Pay Zones:         {zone_thickness(good_pay)} @ {depth_range(good_pay)}\n"
+        if good_pay.any():
+            msg += f"  └─ Avg. Porosity: {avg_properties(good_pay, 'PHI'):.1%}, Perm: {avg_properties(good_pay, 'PERM'):.0f} mD, Sw: {avg_properties(good_pay, 'SW'):.1%}\n"
+        
+        msg += f"• Marginal Pay Zones:     {zone_thickness(pay_zone & ~good_pay)} @ {depth_range(pay_zone & ~good_pay)}\n"
+        msg += f"• Tight Gas Candidates:   {zone_thickness(tight_gas_candidate)} @ {depth_range(tight_gas_candidate)}\n"
+        msg += f"• Transition Zones:       {zone_thickness(transition_zone)} @ {depth_range(transition_zone)}\n"
+        msg += f"• Water Zones:            {zone_thickness(water_zone)} @ {depth_range(water_zone)}\n\n"
+
+        # LITHOLOGICAL ANALYSIS
+        msg += "🪨 LITHOLOGICAL DISTRIBUTION\n"
+        msg += "─" * 50 + "\n"
+        for lith, count in results['LITH'].value_counts().items():
+            percentage = count / len(results) * 100
+            msg += f"• {lith:12s}: {count:3d} ft ({percentage:4.1f}%) @ {depth_range(results['LITH'] == lith)}\n"
+        
+        msg += f"• Clean Sandstone:        {zone_thickness(clean_sand)} @ {depth_range(clean_sand)}\n\n"
+
+        # COMPLETION RECOMMENDATIONS
+        msg += "🔧 COMPLETION & DEVELOPMENT RECOMMENDATIONS\n"
+        msg += "─" * 50 + "\n"
+        
+        if excellent_pay.sum() > 10:
+            msg += f"✅ PRIMARY TARGETS ({excellent_pay.sum()} ft):\n"
+            msg += f"   • Conventional completion recommended\n"
+            msg += f"   • High production potential zones\n"
+            msg += f"   • Consider for primary perforation intervals\n\n"
+        
+        if frac_candidates.sum() > 5:
+            msg += f"⚡ FRACTURING CANDIDATES ({frac_candidates.sum()} ft):\n"
+            msg += f"   • Hydraulic fracturing recommended\n"
+            msg += f"   • Multi-stage completion design\n"
+            msg += f"   • Depth intervals: {depth_range(frac_candidates)}\n\n"
+        
+        if tight_gas_candidate.sum() > 5:
+            msg += f"🎯 TIGHT GAS POTENTIAL ({tight_gas_candidate.sum()} ft):\n"
+            msg += f"   • Unconventional development approach\n"
+            msg += f"   • Enhanced recovery techniques required\n"
+            msg += f"   • Consider horizontal drilling + multi-frac\n\n"
+
+        # DRILLING & LOGGING RECOMMENDATIONS  
+        msg += "🚧 DRILLING & LOGGING RECOMMENDATIONS\n"
+        msg += "─" * 50 + "\n"
+        
+        if water_zone.sum() > len(results) * 0.3:
+            msg += f"⚠️  HIGH WATER RISK: Monitor water production closely\n"
+        
+        if shale_zone.sum() > len(results) * 0.4:
+            msg += f"⚠️  SHALE DOMINANT: Consider shale gas potential\n"
+        
+        if results['PHI'].std() > 0.05:
+            msg += f"📈 HIGH HETEROGENEITY: Detailed reservoir modeling recommended\n"
+        
+        msg += f"🔍 ADDITIONAL LOGGING: Consider advanced logs for detailed characterization\n"
+        msg += f"🎯 CASING PROGRAM: Set casing above {results[water_zone]['DEPTH'].min():.0f} ft if possible\n\n"
+
+        # PRODUCTION FORECAST
+        msg += "📈 PRODUCTION INSIGHTS\n"
+        msg += "─" * 50 + "\n"
+        total_pay = pay_zone.sum()
+        if total_pay > 20:
+            msg += f"🟢 PRODUCTION OUTLOOK: Favorable ({total_pay} ft net pay)\n"
+            msg += f"   • Expected production: Good to excellent\n"
+            msg += f"   • Primary drive mechanism: {'Solution gas' if sw_pred.mean() < 0.6 else 'Water drive
