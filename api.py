@@ -5,32 +5,30 @@ import io, pandas as pd
 from well_log_model import WellLogInterpreter
 
 app = Flask(__name__)
-CORS(app)                                  # allow JS calls from WordPress
-interpreter = WellLogInterpreter()         # single in-memory model instance
-
+CORS(app)
+interpreter = WellLogInterpreter()
 
 # ------------ helpers --------------------------------------
 def ok(data):
     """Return JSON with NumPy scalars converted to native types."""
     import numpy as np, json
     def native(o):
-        if isinstance(o, (np.generic,)):          # np.float32 / int64 …
+        if isinstance(o, (np.generic,)):
             return o.item()
         if isinstance(o, (dict, list, tuple)):
             return json.loads(json.dumps(o, default=native))
         return o
-    return jsonify({'ok': True,  'data': native(data)})
+    return jsonify({'ok': True, 'data': native(data)})
 
 def err(msg, code=400):
     return jsonify({'ok': False, 'error': msg}), code
-
 
 # ------------ routes ---------------------------------------
 @app.route('/')
 def home():
     return "Well-Log AI API is running!"
 
-# 1 Upload & preprocess CSV
+# 1 Upload & preprocess CSV + Generate targets automatically
 @app.route('/upload', methods=['POST'])
 def upload():
     if 'file' not in request.files:
@@ -39,21 +37,24 @@ def upload():
     if f.filename == '':
         return err('No file selected')
     try:
+        # Preprocess data
         interpreter.preprocess_data(f)
-        return ok('CSV loaded & pre-processed')
-    except Exception as e:
-        return err(str(e), 500)
-
-# 2 Generate synthetic targets (demo only)
-@app.route('/targets', methods=['POST'])
-def targets():
-    try:
+        
+        # Automatically generate targets
         interpreter.generate_targets()
-        return ok(interpreter.data['LITHOLOGY'].value_counts().to_dict())
+        
+        # Return upload success with lithology distribution
+        lithology_dist = interpreter.data['LITHOLOGY'].value_counts().to_dict()
+        return ok({
+            'message': 'CSV loaded, preprocessed, and targets generated',
+            'lithology_distribution': lithology_dist
+        })
     except Exception as e:
         return err(str(e), 500)
 
-# 3 Train all models
+# Remove the separate /targets endpoint - no longer needed
+
+# 2 Train all models
 @app.route('/train', methods=['POST'])
 def train():
     try:
@@ -62,17 +63,17 @@ def train():
     except Exception as e:
         return err(str(e), 500)
 
-# 4 Feature-importance dictionary
+# 3 Feature-importance dictionary
 @app.route('/importance', methods=['GET'])
 def importance():
     try:
         feats = interpreter.feature_columns + interpreter.extra_features
-        imps  = interpreter.lithology_model.feature_importances_.round(4)
+        imps = interpreter.lithology_model.feature_importances_.round(4)
         return ok({f: float(v) for f, v in zip(feats, imps)})
     except Exception as e:
         return err(str(e), 500)
 
-# 5 Recommendations (multi-line text)
+# 4 Recommendations (multi-line text)
 @app.route('/recommend', methods=['GET'])
 def recommend():
     try:
@@ -80,7 +81,7 @@ def recommend():
     except Exception as e:
         return err(str(e), 500)
 
-# 6 Professional multi-track log plot (PNG)
+# 5 Professional multi-track log plot (PNG)
 @app.route('/plot', methods=['GET'])
 def plot():
     try:
@@ -93,5 +94,4 @@ def plot():
         return err(str(e), 500)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0')          # or just delete the block
-
+    app.run(host='0.0.0.0')
