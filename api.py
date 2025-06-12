@@ -1,4 +1,4 @@
-# ---------- Flask REST API ---------------------------------
+# api.py
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import io, pandas as pd
@@ -28,7 +28,6 @@ def err(msg, code=400):
 def home():
     return "Well-Log AI API is running!"
 
-# 1 Upload & preprocess CSV + Generate targets automatically
 @app.route('/upload', methods=['POST'])
 def upload():
     if 'file' not in request.files:
@@ -37,13 +36,8 @@ def upload():
     if f.filename == '':
         return err('No file selected')
     try:
-        # Preprocess data
         interpreter.preprocess_data(f)
-        
-        # Automatically generate targets
         interpreter.generate_targets()
-        
-        # Return upload success with lithology distribution
         lithology_dist = interpreter.data['LITHOLOGY'].value_counts().to_dict()
         return ok({
             'message': 'CSV loaded, preprocessed, and targets generated',
@@ -52,9 +46,6 @@ def upload():
     except Exception as e:
         return err(str(e), 500)
 
-# Remove the separate /targets endpoint - no longer needed
-
-# 2 Train all models
 @app.route('/train', methods=['POST'])
 def train():
     try:
@@ -63,7 +54,6 @@ def train():
     except Exception as e:
         return err(str(e), 500)
 
-# 3 Feature-importance dictionary
 @app.route('/importance', methods=['GET'])
 def importance():
     try:
@@ -73,7 +63,6 @@ def importance():
     except Exception as e:
         return err(str(e), 500)
 
-# 4 Recommendations (multi-line text)
 @app.route('/recommend', methods=['GET'])
 def recommend():
     try:
@@ -81,7 +70,6 @@ def recommend():
     except Exception as e:
         return err(str(e), 500)
 
-# 5 Professional multi-track log plot (PNG)
 @app.route('/plot', methods=['GET'])
 def plot():
     try:
@@ -93,5 +81,6 @@ def plot():
     except Exception as e:
         return err(str(e), 500)
 
+# For Vercel serverless functions
 if __name__ == '__main__':
-    app.run(host='0.0.0.0')
+    app.run(debug=True)
