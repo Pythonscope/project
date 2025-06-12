@@ -1,9 +1,6 @@
 flask
 flask-cors
-pandas
 numpy
+pandas
 scikit-learn
-imbalanced-learn
-xgboost
 matplotlib
-gunicorn
