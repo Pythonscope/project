@@ -1,97 +1,92 @@
 # ---------- Flask REST API ---------------------------------
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-import io, pandas as pd
-from well_log_model import WellLogInterpreter
+import io
+import pandas as pd
+import os
+import logging
+from well_log_model import EnhancedWellLogInterpreter
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)                                  # allow JS calls from WordPress
-interpreter = WellLogInterpreter()         # single in-memory model instance
+CORS(app)  # Allow cross-origin requests
 
+# Use enhanced interpreter
+interpreter = EnhancedWellLogInterpreter()
 
 # ------------ helpers --------------------------------------
 def ok(data):
     """Return JSON with NumPy scalars converted to native types."""
-    import numpy as np, json
+    import numpy as np
+    import json
+    
     def native(o):
-        if isinstance(o, (np.generic,)):          # np.float32 / int64 …
+        if isinstance(o, (np.generic,)):
             return o.item()
-        if isinstance(o, (dict, list, tuple)):
-            return json.loads(json.dumps(o, default=native))
+        if isinstance(o, dict):
+            return {k: native(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [native(item) for item in o]
         return o
-    return jsonify({'ok': True,  'data': native(data)})
+    
+    return jsonify({'ok': True, 'data': native(data)})
 
 def err(msg, code=400):
-    return jsonify({'ok': False, 'error': msg}), code
-
+    logger.error(f"API Error: {msg}")
+    return jsonify({'ok': False, 'error': str(msg)}), code
 
 # ------------ routes ---------------------------------------
 @app.route('/')
 def home():
-    return "Well-Log AI API is running!"
+    return "AI Well Log Interpreter API is running!"
+
+@app.route('/health')
+def health():
+    """Health check endpoint for deployment platforms"""
+    return ok({'status': 'healthy', 'service': 'AI Well Log Interpreter'})
 
 # 1 Upload & preprocess CSV
 @app.route('/upload', methods=['POST'])
 def upload():
-    if 'file' not in request.files:
-        return err('No file part')
-    f = request.files['file']
-    if f.filename == '':
-        return err('No file selected')
     try:
-        interpreter.preprocess_data(f)
-        return ok('CSV loaded & pre-processed')
+        if 'file' not in request.files:
+            return err('No file part in request')
+        
+        file = request.files['file']
+        if file.filename == '':
+            return err('No file selected')
+        
+        if not file.filename.lower().endswith('.csv'):
+            return err('File must be a CSV file')
+        
+        # Process the file
+        result = interpreter.preprocess_data(file)
+        
+        # Return summary information
+        summary = {
+            'message': 'CSV loaded & preprocessed successfully',
+            'rows': len(result),
+            'columns': list(result.columns),
+            'features_created': len(interpreter.extra_features)
+        }
+        
+        return ok(summary)
+        
     except Exception as e:
-        return err(str(e), 500)
+        logger.error(f"Upload error: {str(e)}")
+        return err(f"Upload failed: {str(e)}", 500)
 
-# 2 Generate synthetic targets (demo only)
-@app.route('/targets', methods=['POST'])
-def targets():
-    try:
-        interpreter.generate_targets()
-        return ok(interpreter.data['LITHOLOGY'].value_counts().to_dict())
-    except Exception as e:
-        return err(str(e), 500)
-
-# 3 Train all models
+# 2 Train all models (enhanced)
 @app.route('/train', methods=['POST'])
 def train():
     try:
-        interpreter.train_models()
-        return ok(interpreter.metrics)
-    except Exception as e:
-        return err(str(e), 500)
-
-# 4 Feature-importance dictionary
-@app.route('/importance', methods=['GET'])
-def importance():
-    try:
-        feats = interpreter.feature_columns + interpreter.extra_features
-        imps  = interpreter.lithology_model.feature_importances_.round(4)
-        return ok({f: float(v) for f, v in zip(feats, imps)})
-    except Exception as e:
-        return err(str(e), 500)
-
-# 5 Recommendations (multi-line text)
-@app.route('/recommend', methods=['GET'])
-def recommend():
-    try:
-        return ok(interpreter.generate_recommendations())
-    except Exception as e:
-        return err(str(e), 500)
-
-# 6 Professional multi-track log plot (PNG)
-@app.route('/plot', methods=['GET'])
-def plot():
-    try:
-        fig = interpreter.make_plot()
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-        buf.seek(0)
-        return send_file(buf, mimetype='image/png')
-    except Exception as e:
-        return err(str(e), 500)
-
-
-if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+        if interpreter.data is None:
+            return err('No data loaded. Please upload a CSV file first.')
+        
+        # Use enhanced training method
+        interpreter.train_enhanced_models()
+        
+        return
