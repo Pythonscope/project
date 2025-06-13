@@ -7,4 +7,5 @@ matplotlib
 xgboost
 imbalanced-learn
 gunicorn
-pytest
+lightgbm
+
